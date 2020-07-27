@@ -1,13 +1,11 @@
 //! Functions for performing template matching.
 use crate::definitions::Image;
 use crate::integral_image::{integral_squared_image, sum_image_pixels, ArrayData};
-use crate::map::WithChannel;
+use crate::map::{WithChannel, map_pixels};
 use crate::rect::Rect;
-use image::Luma;
-use image::{GenericImageView, Pixel, Primitive};
+use image::{GenericImageView, Pixel, Primitive, Luma};
 use num::traits::NumAssign;
 use num::{NumCast, ToPrimitive};
-use std::ops::AddAssign;
 
 /// Method used to compute the matching score between a template and an image region.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -25,6 +23,11 @@ pub enum MatchTemplateMethod {
     CrossCorrelation,
     /// Divides the sum computed using `CrossCorrelation` by a normalization term.
     CrossCorrelationNormalized,
+    ///
+    CorrelationCoefficient,
+    ///
+    CorrelationCoefficientNormalized,
+
 }
 
 /// Slides a `template` over an `image` and scores the match at each point using
@@ -58,6 +61,16 @@ where
         image_height >= template_height,
         "image height must be greater than or equal to template height"
     );
+
+    match method {
+        MatchTemplateMethod::CorrelationCoefficient => {
+            return match_template_correlation_coefficient(image, template, false);
+        }
+        MatchTemplateMethod::CorrelationCoefficientNormalized => {
+            return match_template_correlation_coefficient(image, template, true);
+        }
+        _ => {}
+    };
 
     let should_normalize = match method {
         MatchTemplateMethod::SumOfSquaredErrorsNormalized
@@ -105,6 +118,7 @@ where
                             CrossCorrelation | CrossCorrelationNormalized => {
                                 image_value * template_value
                             }
+                            _ => {0.0} // Should not be possible
                         };
                     }
                 }
@@ -124,6 +138,136 @@ where
 
     result
 }
+
+///
+fn match_template_correlation_coefficient<P>(
+    image: &Image<P>,
+    template: &Image<P>,
+    normalize: bool,
+) -> Image<Luma<f32>>
+where
+    P: Pixel + 'static,
+    P::Subpixel: NumCast + NumAssign,
+{
+    let (image_width, image_height) = image.dimensions();
+    let (template_width, template_height) = template.dimensions();
+
+    assert!(
+        image_width >= template_width,
+        "image width must be greater than or equal to template width"
+    );
+    assert!(
+        image_height >= template_height,
+        "image height must be greater than or equal to template height"
+    );
+
+
+    assert_eq!(
+        P::CHANNEL_COUNT, 1,
+        "image must have only one channel for correlation coeffficient"
+    );
+
+    // Create Result Image
+    let mut result = Image::new(
+        image_width - template_width + 1,
+        image_height - template_height + 1,
+    );
+
+    // Number of pixels within window
+    let n = (template_height * template_width) as f32;
+
+    // Pre-calculate mean / sample stddev of template
+    let (template_mean, template_stddev) = get_mean_stddev(template, Rect::at(0,0).of_size(template_width, template_height));
+
+    // Pre-calculate top of variance equation
+    let variance_parts: Image<Luma<f32>> = map_pixels(template, |_x, _y, p| {
+        let tp_value: f32 = NumCast::from(p.channels()[0]).unwrap();
+        Luma([(tp_value - template_mean) / template_stddev])
+    });
+
+    // Calculate the Correlation Coefficient
+    for y in 0..result.height() {
+        for x in 0..result.width() {
+
+            // Calculate mean / sample stddev of window
+            let (mean_image, std_image) = get_mean_stddev(image, Rect::at(x as i32,y as i32).of_size(template_width, template_height));
+
+            let mut final_sum : f32 = 0f32;
+
+            for dy in 0..template_height {
+                for dx in 0..template_width {
+                    let image_pixel = unsafe { image.unsafe_get_pixel(x + dx, y + dy) };
+                    let template_var_pixel = unsafe { variance_parts.unsafe_get_pixel(dx, dy) };
+
+                    let im_value: f32 = NumCast::from(image_pixel.channels()[0]).unwrap();
+                    let tp_var_value: f32 = NumCast::from(template_var_pixel.channels()[0]).unwrap();
+
+                    // Sum the Multiply the variance tops of image and template
+                    final_sum += ((im_value - mean_image) / std_image) * tp_var_value;
+                }
+            }
+
+            if normalize {
+                result.put_pixel(x, y, Luma([final_sum / (n-1.0)]));
+            }
+            else {
+                result.put_pixel(x, y, Luma([final_sum]));
+            }
+        }
+    }
+
+    result
+}
+
+/// Returns Mean and Sample Standard Deviation of region within image
+///
+/// If multi-channel image passed through, will only perform on first channel.
+///
+/// Return values are (mean, sample_standard_deviation)
+fn get_mean_stddev<P>(image: &Image<P>, region: Rect) -> (f32, f32)
+where
+    P: Pixel + 'static,
+    P::Subpixel: NumAssign + 'static,
+{
+    debug_assert!(region.left() > 0);
+    debug_assert!(region.top() > 0);
+    debug_assert!(region.right() < image.width() as i32);
+    debug_assert!(region.bottom() < image.height() as i32);
+
+    // Number of pixels within window
+    let n = (image.width() * image.height()) as f32;
+
+    // Calculate Mean
+    let mut sum_template = 0f32;
+
+    for dy in region.top()..region.bottom() {
+        for dx in region.left()..region.right() {
+            let template_pixel = unsafe { image.unsafe_get_pixel(dx as u32, dy as u32) };
+
+            let tp_value: f32 = NumCast::from(template_pixel.channels()[0]).unwrap();
+            sum_template += tp_value;
+        }
+    }
+
+    let mean_template = sum_template / n;
+
+    // Calculate Sample Standard Deviation
+    sum_template = 0f32;
+
+    for dy in region.top()..region.bottom() {
+        for dx in region.left()..region.right() {
+            let template_pixel = unsafe { image.unsafe_get_pixel(dx as u32, dy as u32) };
+            let tp_value: f32 = NumCast::from(template_pixel.channels()[0]).unwrap();
+
+            sum_template += (tp_value - mean_template).powf(2.0);
+        }
+    }
+
+    let std_template = (sum_template / (n-1.0)).sqrt();
+
+    return (mean_template, std_template);
+}
+
 
 fn sum_squares<P>(template: &Image<P>) -> f32
 where
@@ -150,7 +294,7 @@ fn normalization_term<P>(
 ) -> f32
 where
     P: Pixel + 'static + ArrayData,
-    P::Subpixel: AddAssign + 'static,
+    P::Subpixel: NumAssign + 'static,
 {
     let image_sum = sum_image_pixels(
         image_squared_integral,
