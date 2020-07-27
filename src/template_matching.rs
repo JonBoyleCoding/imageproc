@@ -186,50 +186,62 @@ where
         image_height - template_height + 1,
     );
 
-    // Number of pixels within window
-    let n = (template_height * template_width) as f32;
-
     // Pre-calculate mean / sample stddev of template
-    let (template_mean, template_stddev) = get_mean_stddev(
+    let template_mean = get_mean(
         template,
         Rect::at(0, 0).of_size(template_width, template_height),
     );
 
     // Pre-calculate top of variance equation
-    let variance_parts: Image<Luma<f32>> = map_pixels(template, |_x, _y, p| {
+    let variance_tops: Image<Luma<f32>> = map_pixels(template, |_x, _y, p| {
         let tp_value: f32 = NumCast::from(p.channels()[0]).unwrap();
-        Luma([(tp_value - template_mean) / template_stddev])
+        Luma([(tp_value - template_mean)])
+    });
+
+    let variance_tops_squared: Image<Luma<f32>> = map_pixels(&variance_tops, |_x, _y, pxl| {
+        let tp_value: f32 = pxl.0[0];
+        Luma([tp_value.powi(2)])
     });
 
     // Calculate the Correlation Coefficient
     for y in 0..result.height() {
         for x in 0..result.width() {
             // Calculate mean / sample stddev of window
-            let (image_mean, image_stddev) = get_mean_stddev(
+            let image_mean = get_mean(
                 image,
                 Rect::at(x as i32, y as i32).of_size(template_width, template_height),
             );
 
-            let mut final_sum: f32 = 0f32;
+            let mut top_sum: f32 = 0f32;
+            let mut bottom_x: f32 = 0f32;
+            let mut bottom_y: f32 = 0f32;
 
             for dy in 0..template_height {
                 for dx in 0..template_width {
                     let image_pixel = unsafe { image.unsafe_get_pixel(x + dx, y + dy) };
-                    let template_var_pixel = unsafe { variance_parts.unsafe_get_pixel(dx, dy) };
+                    let template_var_pixel = unsafe { variance_tops.unsafe_get_pixel(dx, dy) };
 
                     let im_value: f32 = NumCast::from(image_pixel.channels()[0]).unwrap();
-                    let tp_var_value: f32 =
-                        NumCast::from(template_var_pixel.channels()[0]).unwrap();
+                    let tp_var_value: f32 = template_var_pixel.0[0];
 
                     // Sum the Multiply the variance tops of image and template
-                    final_sum += ((im_value - image_mean) / image_stddev) * tp_var_value;
+                    let im_var_top = im_value - image_mean;
+                    top_sum += im_var_top * tp_var_value;
+
+                    if normalize {
+                        let template_var_sq_pixel =
+                            unsafe { variance_tops_squared.unsafe_get_pixel(dx, dy) };
+
+                        bottom_x += im_var_top.powi(2);
+                        bottom_y += template_var_sq_pixel.0[0];
+                    }
                 }
             }
 
             if normalize {
-                result.put_pixel(x, y, Luma([final_sum / (n - 1.0)]));
+                result.put_pixel(x, y, Luma([top_sum / (bottom_x.sqrt() * bottom_y.sqrt())]));
             } else {
-                result.put_pixel(x, y, Luma([final_sum]));
+                result.put_pixel(x, y, Luma([top_sum]));
             }
         }
     }
@@ -242,7 +254,7 @@ where
 /// If multi-channel image passed through, will only perform on first channel.
 ///
 /// Return values are (mean, sample_standard_deviation)
-fn get_mean_stddev<P>(image: &Image<P>, region: Rect) -> (f32, f32)
+fn get_mean<P>(image: &Image<P>, region: Rect) -> f32
 where
     P: Pixel + 'static,
     P::Subpixel: NumAssign + 'static,
@@ -255,11 +267,11 @@ where
     // Number of pixels within window
     let n = (region.width() * region.height()) as f32;
 
-    // Calculate Mean
-    let mut sum_template = 0f32;
+    // Calculate Total Sum
+    let mut sum_template: f32 = 0f32;
 
-    for dy in region.top()..region.bottom()+1 {
-        for dx in region.left()..region.right()+1 {
+    for dy in region.top()..region.bottom() + 1 {
+        for dx in region.left()..region.right() + 1 {
             let template_pixel = unsafe { image.unsafe_get_pixel(dx as u32, dy as u32) };
 
             let tp_value: f32 = NumCast::from(template_pixel.channels()[0]).unwrap();
@@ -267,23 +279,8 @@ where
         }
     }
 
-    let mean_template = sum_template / n;
-
-    // Calculate Sample Standard Deviation
-    sum_template = 0f32;
-
-    for dy in region.top()..region.bottom()+1 {
-        for dx in region.left()..region.right()+1 {
-            let template_pixel = unsafe { image.unsafe_get_pixel(dx as u32, dy as u32) };
-            let tp_value: f32 = NumCast::from(template_pixel.channels()[0]).unwrap();
-
-            sum_template += (tp_value - mean_template).powf(2.0);
-        }
-    }
-
-    let std_template = (sum_template / (n - 1.0)).sqrt();
-
-    return (mean_template, std_template);
+    // Calculate and return mean
+    return sum_template / n;
 }
 
 fn sum_squares<P>(template: &Image<P>) -> f32
@@ -624,7 +621,11 @@ mod tests {
             3, 4
         );
 
-        let actual = match_template(&image, &template, MatchTemplateMethod::CorrelationCoefficient);
+        let actual = match_template(
+            &image,
+            &template,
+            MatchTemplateMethod::CorrelationCoefficient,
+        );
 
         // Expected results from OpenCV's implementation
         let expected = gray_image!(type: f32,
@@ -647,30 +648,33 @@ mod tests {
             3, 4
         );
 
-        let actual = match_template(&image, &template, MatchTemplateMethod::CorrelationCoefficientNormalized);
+        let actual = match_template(
+            &image,
+            &template,
+            MatchTemplateMethod::CorrelationCoefficientNormalized,
+        );
 
         // Expected results from OpenCV's implementation
         let expected = gray_image!(type: f32,
-            -0.1825742, -0.4;
-            0.6741998, 0.92338043
+            -0.18257418, -0.4;
+            0.6741998, 0.9233805
         );
 
         assert_pixels_eq!(actual, expected);
     }
 
     #[test]
-    fn match_template_mean_stddev() {
+    fn match_template_mean() {
         let image = gray_image!(
             1, 4, 2;
             2, 1, 3;
             3, 3, 4
         );
-        let actual = get_mean_stddev(&image, Rect::at(0,0).of_size(2,2));
-        let expected = (2f32, 1.4142135f32);
+        let actual = get_mean(&image, Rect::at(0, 0).of_size(2, 2));
+        let expected = 2f32;
 
         assert_eq!(actual, expected);
     }
-
 
     macro_rules! bench_match_template {
         ($name:ident, image_size: $s:expr, template_size: $t:expr, method: $m:expr) => {
