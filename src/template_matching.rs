@@ -121,7 +121,7 @@ where
                                     CrossCorrelation | CrossCorrelationNormalized => {
                                         image_value * template_value
                                     }
-                                    _ => {0.0} // Should not be possible
+                                    _ => {panic!("Should not be possible to reach this line of code.")}
                                 };
                             }
                         }
@@ -196,7 +196,7 @@ where
         for x in 0..result.width() {
 
             // Calculate mean / sample stddev of window
-            let (mean_image, std_image) = get_mean_stddev(image, Rect::at(x as i32,y as i32).of_size(template_width, template_height));
+            let (image_mean, image_stddev) = get_mean_stddev(image, Rect::at(x as i32, y as i32).of_size(template_width, template_height));
 
             let mut final_sum : f32 = 0f32;
 
@@ -209,7 +209,7 @@ where
                     let tp_var_value: f32 = NumCast::from(template_var_pixel.channels()[0]).unwrap();
 
                     // Sum the Multiply the variance tops of image and template
-                    final_sum += ((im_value - mean_image) / std_image) * tp_var_value;
+                    final_sum += ((im_value - image_mean) / image_stddev) * tp_var_value;
                 }
             }
 
