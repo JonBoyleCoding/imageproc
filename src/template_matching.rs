@@ -23,9 +23,13 @@ pub enum MatchTemplateMethod {
     CrossCorrelation,
     /// Divides the sum computed using `CrossCorrelation` by a normalization term.
     CrossCorrelationNormalized,
+    /// Correlation Coefficient
     ///
+    /// -1 is negative correlation
+    /// 0 is no correlation
+    /// +1 is perfect correlation
     CorrelationCoefficient,
-    ///
+    /// Divides the sum computed using `CorrelationCoefficient` by a normalization term.
     CorrelationCoefficientNormalized,
 
 }
@@ -39,7 +43,8 @@ pub enum MatchTemplateMethod {
 /// # Panics
 ///
 /// If either dimension of `template` is not strictly less than the corresponding dimension
-/// of `image`.
+/// of `image`, or Correlation Coefficient being calculated with more than one channel per
+/// pixel.
 pub fn match_template<P>(
     image: &Image<P>,
     template: &Image<P>,
@@ -62,84 +67,85 @@ where
         "image height must be greater than or equal to template height"
     );
 
+    use MatchTemplateMethod::*;
+
     match method {
-        MatchTemplateMethod::CorrelationCoefficient => {
+        CorrelationCoefficient => {
             return match_template_correlation_coefficient(image, template, false);
         }
-        MatchTemplateMethod::CorrelationCoefficientNormalized => {
+        CorrelationCoefficientNormalized => {
             return match_template_correlation_coefficient(image, template, true);
         }
-        _ => {}
-    };
+        SumOfSquaredErrors | SumOfSquaredErrorsNormalized | CrossCorrelation | CrossCorrelationNormalized => {
+            let should_normalize = match method {
+                MatchTemplateMethod::SumOfSquaredErrorsNormalized
+                | MatchTemplateMethod::CrossCorrelationNormalized => true,
+                _ => false,
+            };
 
-    let should_normalize = match method {
-        MatchTemplateMethod::SumOfSquaredErrorsNormalized
-        | MatchTemplateMethod::CrossCorrelationNormalized => true,
-        _ => false,
-    };
+            let image_squared_integral = if should_normalize {
+                Some(integral_squared_image::<_, f32>(image))
+            } else {
+                None
+            };
 
-    let image_squared_integral = if should_normalize {
-        Some(integral_squared_image::<_, f32>(image))
-    } else {
-        None
-    };
+            let template_squared_sum = if should_normalize {
+                Some(sum_squares(template))
+            } else {
+                None
+            };
 
-    let template_squared_sum = if should_normalize {
-        Some(sum_squares(template))
-    } else {
-        None
-    };
+            let mut result = Image::new(
+                image_width - template_width + 1,
+                image_height - template_height + 1,
+            );
 
-    let mut result = Image::new(
-        image_width - template_width + 1,
-        image_height - template_height + 1,
-    );
+            for y in 0..result.height() {
+                for x in 0..result.width() {
+                    let mut score = 0f32;
 
-    for y in 0..result.height() {
-        for x in 0..result.width() {
-            let mut score = 0f32;
+                    for dy in 0..template_height {
+                        for dx in 0..template_width {
+                            let image_pixel = unsafe { image.unsafe_get_pixel(x + dx, y + dy) };
+                            let template_pixel = unsafe { template.unsafe_get_pixel(dx, dy) };
 
-            for dy in 0..template_height {
-                for dx in 0..template_width {
-                    let image_pixel = unsafe { image.unsafe_get_pixel(x + dx, y + dy) };
-                    let template_pixel = unsafe { template.unsafe_get_pixel(dx, dy) };
+                            for c in 0..P::CHANNEL_COUNT {
+                                let image_value = image_pixel.channels()[c as usize].to_f32().unwrap();
+                                let template_value =
+                                    template_pixel.channels()[c as usize].to_f32().unwrap();
 
-                    for c in 0..P::CHANNEL_COUNT {
-                        let image_value = image_pixel.channels()[c as usize].to_f32().unwrap();
-                        let template_value =
-                            template_pixel.channels()[c as usize].to_f32().unwrap();
-
-                        use MatchTemplateMethod::*;
-
-                        score += match method {
-                            SumOfSquaredErrors | SumOfSquaredErrorsNormalized => {
-                                (image_value - template_value).powf(2.0)
+                                score += match method {
+                                    SumOfSquaredErrors | SumOfSquaredErrorsNormalized => {
+                                        (image_value - template_value).powf(2.0)
+                                    }
+                                    CrossCorrelation | CrossCorrelationNormalized => {
+                                        image_value * template_value
+                                    }
+                                    _ => {0.0} // Should not be possible
+                                };
                             }
-                            CrossCorrelation | CrossCorrelationNormalized => {
-                                image_value * template_value
-                            }
-                            _ => {0.0} // Should not be possible
-                        };
+                        }
                     }
+
+                    if let (&Some(ref i), &Some(t)) = (&image_squared_integral, &template_squared_sum) {
+                        let region = Rect::at(x as i32, y as i32).of_size(template_width, template_height);
+                        let norm = normalization_term(i, t, region);
+                        if norm > 0.0 {
+                            score /= norm;
+                        }
+                    }
+
+                    result.put_pixel(x, y, Luma([score]));
                 }
             }
 
-            if let (&Some(ref i), &Some(t)) = (&image_squared_integral, &template_squared_sum) {
-                let region = Rect::at(x as i32, y as i32).of_size(template_width, template_height);
-                let norm = normalization_term(i, t, region);
-                if norm > 0.0 {
-                    score /= norm;
-                }
-            }
-
-            result.put_pixel(x, y, Luma([score]));
+            return result
         }
-    }
+    };
 
-    result
 }
 
-///
+/// Performs template match for correlation coefficient
 fn match_template_correlation_coefficient<P>(
     image: &Image<P>,
     template: &Image<P>,
@@ -147,7 +153,7 @@ fn match_template_correlation_coefficient<P>(
 ) -> Image<Luma<f32>>
 where
     P: Pixel + 'static,
-    P::Subpixel: NumCast + NumAssign,
+    P::Subpixel: NumCast + NumAssign + 'static,
 {
     let (image_width, image_height) = image.dimensions();
     let (template_width, template_height) = template.dimensions();
