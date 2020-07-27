@@ -165,11 +165,11 @@ where
     let (image_width, image_height) = image.dimensions();
     let (template_width, template_height) = template.dimensions();
 
-    assert!(
+    debug_assert!(
         image_width >= template_width,
         "image width must be greater than or equal to template width"
     );
-    assert!(
+    debug_assert!(
         image_height >= template_height,
         "image height must be greater than or equal to template height"
     );
@@ -247,19 +247,19 @@ where
     P: Pixel + 'static,
     P::Subpixel: NumAssign + 'static,
 {
-    debug_assert!(region.left() > 0);
-    debug_assert!(region.top() > 0);
+    debug_assert!(region.left() >= 0);
+    debug_assert!(region.top() >= 0);
     debug_assert!(region.right() < image.width() as i32);
     debug_assert!(region.bottom() < image.height() as i32);
 
     // Number of pixels within window
-    let n = (image.width() * image.height()) as f32;
+    let n = (region.width() * region.height()) as f32;
 
     // Calculate Mean
     let mut sum_template = 0f32;
 
-    for dy in region.top()..region.bottom() {
-        for dx in region.left()..region.right() {
+    for dy in region.top()..region.bottom()+1 {
+        for dx in region.left()..region.right()+1 {
             let template_pixel = unsafe { image.unsafe_get_pixel(dx as u32, dy as u32) };
 
             let tp_value: f32 = NumCast::from(template_pixel.channels()[0]).unwrap();
@@ -272,8 +272,8 @@ where
     // Calculate Sample Standard Deviation
     sum_template = 0f32;
 
-    for dy in region.top()..region.bottom() {
-        for dx in region.left()..region.right() {
+    for dy in region.top()..region.bottom()+1 {
+        for dx in region.left()..region.right()+1 {
             let template_pixel = unsafe { image.unsafe_get_pixel(dx as u32, dy as u32) };
             let tp_value: f32 = NumCast::from(template_pixel.channels()[0]).unwrap();
 
@@ -611,6 +611,66 @@ mod tests {
 
         assert_pixels_eq!(actual, expected);
     }
+
+    #[test]
+    fn match_template_correlation_coefficient() {
+        let image = gray_image!(
+            1, 4, 2;
+            2, 1, 3;
+            3, 3, 4
+        );
+        let template = gray_image!(
+            1, 2;
+            3, 4
+        );
+
+        let actual = match_template(&image, &template, MatchTemplateMethod::CorrelationCoefficient);
+
+        // Expected results from OpenCV's implementation
+        let expected = gray_image!(type: f32,
+            -1., -2.;
+            2.5, 4.5
+        );
+
+        assert_pixels_eq!(actual, expected);
+    }
+
+    #[test]
+    fn match_template_correlation_coefficient_normalized() {
+        let image = gray_image!(
+            1, 4, 2;
+            2, 1, 3;
+            3, 3, 4
+        );
+        let template = gray_image!(
+            1, 2;
+            3, 4
+        );
+
+        let actual = match_template(&image, &template, MatchTemplateMethod::CorrelationCoefficientNormalized);
+
+        // Expected results from OpenCV's implementation
+        let expected = gray_image!(type: f32,
+            -0.1825742, -0.4;
+            0.6741998, 0.92338043
+        );
+
+        assert_pixels_eq!(actual, expected);
+    }
+
+    #[test]
+    fn match_template_mean_stddev() {
+        let image = gray_image!(
+            1, 4, 2;
+            2, 1, 3;
+            3, 3, 4
+        );
+        let actual = get_mean_stddev(&image, Rect::at(0,0).of_size(2,2));
+        let expected = (2f32, 1.4142135f32);
+
+        assert_eq!(actual, expected);
+    }
+
 
     macro_rules! bench_match_template {
         ($name:ident, image_size: $s:expr, template_size: $t:expr, method: $m:expr) => {
