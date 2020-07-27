@@ -1,9 +1,9 @@
 //! Functions for performing template matching.
 use crate::definitions::Image;
 use crate::integral_image::{integral_squared_image, sum_image_pixels, ArrayData};
-use crate::map::{WithChannel, map_pixels};
+use crate::map::{map_pixels, WithChannel};
 use crate::rect::Rect;
-use image::{GenericImageView, Pixel, Primitive, Luma};
+use image::{GenericImageView, Luma, Pixel, Primitive};
 use num::traits::NumAssign;
 use num::{NumCast, ToPrimitive};
 
@@ -31,7 +31,6 @@ pub enum MatchTemplateMethod {
     CorrelationCoefficient,
     /// Divides the sum computed using `CorrelationCoefficient` by a normalization term.
     CorrelationCoefficientNormalized,
-
 }
 
 /// Slides a `template` over an `image` and scores the match at each point using
@@ -76,7 +75,10 @@ where
         CorrelationCoefficientNormalized => {
             return match_template_correlation_coefficient(image, template, true);
         }
-        SumOfSquaredErrors | SumOfSquaredErrorsNormalized | CrossCorrelation | CrossCorrelationNormalized => {
+        SumOfSquaredErrors
+        | SumOfSquaredErrorsNormalized
+        | CrossCorrelation
+        | CrossCorrelationNormalized => {
             let should_normalize = match method {
                 MatchTemplateMethod::SumOfSquaredErrorsNormalized
                 | MatchTemplateMethod::CrossCorrelationNormalized => true,
@@ -110,7 +112,8 @@ where
                             let template_pixel = unsafe { template.unsafe_get_pixel(dx, dy) };
 
                             for c in 0..P::CHANNEL_COUNT {
-                                let image_value = image_pixel.channels()[c as usize].to_f32().unwrap();
+                                let image_value =
+                                    image_pixel.channels()[c as usize].to_f32().unwrap();
                                 let template_value =
                                     template_pixel.channels()[c as usize].to_f32().unwrap();
 
@@ -121,14 +124,19 @@ where
                                     CrossCorrelation | CrossCorrelationNormalized => {
                                         image_value * template_value
                                     }
-                                    _ => {panic!("Should not be possible to reach this line of code.")}
+                                    _ => {
+                                        panic!("Should not be possible to reach this line of code.")
+                                    }
                                 };
                             }
                         }
                     }
 
-                    if let (&Some(ref i), &Some(t)) = (&image_squared_integral, &template_squared_sum) {
-                        let region = Rect::at(x as i32, y as i32).of_size(template_width, template_height);
+                    if let (&Some(ref i), &Some(t)) =
+                        (&image_squared_integral, &template_squared_sum)
+                    {
+                        let region =
+                            Rect::at(x as i32, y as i32).of_size(template_width, template_height);
                         let norm = normalization_term(i, t, region);
                         if norm > 0.0 {
                             score /= norm;
@@ -139,10 +147,9 @@ where
                 }
             }
 
-            return result
+            return result;
         }
     };
-
 }
 
 /// Performs template match for correlation coefficient
@@ -167,9 +174,9 @@ where
         "image height must be greater than or equal to template height"
     );
 
-
     assert_eq!(
-        P::CHANNEL_COUNT, 1,
+        P::CHANNEL_COUNT,
+        1,
         "image must have only one channel for correlation coeffficient"
     );
 
@@ -183,7 +190,10 @@ where
     let n = (template_height * template_width) as f32;
 
     // Pre-calculate mean / sample stddev of template
-    let (template_mean, template_stddev) = get_mean_stddev(template, Rect::at(0,0).of_size(template_width, template_height));
+    let (template_mean, template_stddev) = get_mean_stddev(
+        template,
+        Rect::at(0, 0).of_size(template_width, template_height),
+    );
 
     // Pre-calculate top of variance equation
     let variance_parts: Image<Luma<f32>> = map_pixels(template, |_x, _y, p| {
@@ -194,11 +204,13 @@ where
     // Calculate the Correlation Coefficient
     for y in 0..result.height() {
         for x in 0..result.width() {
-
             // Calculate mean / sample stddev of window
-            let (image_mean, image_stddev) = get_mean_stddev(image, Rect::at(x as i32, y as i32).of_size(template_width, template_height));
+            let (image_mean, image_stddev) = get_mean_stddev(
+                image,
+                Rect::at(x as i32, y as i32).of_size(template_width, template_height),
+            );
 
-            let mut final_sum : f32 = 0f32;
+            let mut final_sum: f32 = 0f32;
 
             for dy in 0..template_height {
                 for dx in 0..template_width {
@@ -206,7 +218,8 @@ where
                     let template_var_pixel = unsafe { variance_parts.unsafe_get_pixel(dx, dy) };
 
                     let im_value: f32 = NumCast::from(image_pixel.channels()[0]).unwrap();
-                    let tp_var_value: f32 = NumCast::from(template_var_pixel.channels()[0]).unwrap();
+                    let tp_var_value: f32 =
+                        NumCast::from(template_var_pixel.channels()[0]).unwrap();
 
                     // Sum the Multiply the variance tops of image and template
                     final_sum += ((im_value - image_mean) / image_stddev) * tp_var_value;
@@ -214,9 +227,8 @@ where
             }
 
             if normalize {
-                result.put_pixel(x, y, Luma([final_sum / (n-1.0)]));
-            }
-            else {
+                result.put_pixel(x, y, Luma([final_sum / (n - 1.0)]));
+            } else {
                 result.put_pixel(x, y, Luma([final_sum]));
             }
         }
@@ -269,11 +281,10 @@ where
         }
     }
 
-    let std_template = (sum_template / (n-1.0)).sqrt();
+    let std_template = (sum_template / (n - 1.0)).sqrt();
 
     return (mean_template, std_template);
 }
-
 
 fn sum_squares<P>(template: &Image<P>) -> f32
 where
